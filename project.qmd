@@ -570,12 +570,13 @@ percentile_df <- nl_west |>
   ungroup() |>
   group_by(game_year) |>
   mutate(
-    percentile_avg_exit_velo = round(percent_rank(avg_exit_velo), 2) * 100,
-    percentile_woba_against = round(percent_rank(woba_against), 2) * 100,
+    percentile_avg_exit_velo = (1 - round(percent_rank(avg_exit_velo), 2)) * 100,
+    percentile_woba_against = (1-round(percent_rank(woba_against), 2)) * 100,
     percentile_gb_rate = round(percent_rank(gb_rate), 2) * 100,
     percentile_fb_rate = round(percent_rank(fb_rate), 2) * 100,
     percentile_ld_rate = round(percent_rank(ld_rate), 2) * 100,
-    percentile_k_rate = round(percent_rank(k_rate), 2) * 100
+    percentile_k_rate = round(percent_rank(k_rate), 2) * 100,
+    percentile_bb_rate = (1 - round(percent_rank(bb_rate),2)) * 100
   ) |>
 #want integer values for the plot
   ungroup()
@@ -584,124 +585,10 @@ percentile_df <- nl_west |>
 
 ```
 
-### Percentile Function
+The code snippet demonstrates the use of the tidyverse package to calculate player performance metrics and derive their percentiles for visual analysis. It begins by filtering the nl_west dataset to retain only relevant columns, including player names, pitch details, and performance metrics like launch_speed and woba_value. Key summary statistics are then computed, such as average exit velocity (avg_exit_velo), weighted on-base average against (woba_against), and rates for ground balls, fly balls, line drives, and strikeouts. These metrics are aggregated by year (game_year) and player (player_name) to provide an overview of player performance for each season.
 
-```{r percentile profile}
-library(ggplot2)
-library(tidyr)
-library(dplyr)
+The second step involves calculating percentile ranks for the aggregated metrics within each year. Using the percent_rank() function, each metric is normalized on a scale of 0 to 100, making it easier to compare players. Metrics such as ground ball rate (gb_rate) and strikeout rate (k_rate) are converted into percentiles to highlight relative performance. These percentile values are rounded to integers for better visualization in plots. Finally, the ungroup() function ensures the data is prepared for further analysis or plotting without residual group structure, facilitating seamless integration into downstream workflows like visualization or modeling. This approach provides a comprehensive view of player performance, enabling analysts to evaluate players' relative strengths and weaknesses efficiently.
 
-percentile_profile <- function(data, name, year) {
-  
-  # Prepare data for plotting
-  plot_data <- data |>
-    filter(player_name == name, game_year == year) |>
-    select(
-      `Avg Exit Velocity` = percentile_avg_exit_velo,
-      wOBA = percentile_woba_against,
-      `Ground Ball Rate` = percentile_gb_rate,
-      `Fly Ball Rate` = percentile_fb_rate,
-      `Line Drive Rate` = percentile_ld_rate,
-      `K Rate` = percentile_k_rate
-    ) |>
-    pivot_longer(
-      cols = everything(),
-      names_to = "Metric",
-      values_to = "Percentile"
-    )
-  
-  # Set the levels of Metric to ensure order
-  plot_data$Metric <- factor(
-    plot_data$Metric,
-    levels = c(
-      "Avg Exit Velocity",
-      "wOBA",
-      "Ground Ball Rate",
-      "Fly Ball Rate",
-      "Line Drive Rate",
-      "K Rate"
-    )
-  )
-  
-  # Create the plot
-  percentile_plot <- ggplot(plot_data, aes(x = Metric, y = Percentile)) +
-    geom_col(width = 0.5, aes(fill = Percentile)) + # Skinnier bars
-    geom_point(aes(x = Metric, y = Percentile), size = 10, color = "black", fill = "white", shape = 21) + # Circles
-    geom_text(aes(x = Metric, y = Percentile, label = Percentile), vjust = 0.5, color = "black", size = 3.5, fontface = "bold") + # Annotated values
-    scale_fill_gradient2(
-      low = "blue",
-      mid = "grey",
-      high = "red",
-      midpoint = 50, # Middle point of the gradient
-      limits = c(0, 100)
-    ) +
-    scale_y_continuous(
-      breaks = c(0, 50, 100), # Always show breaks at 0, 50, and 100
-      labels = c("Poor", "Average", "Great"), # Custom labels for the breaks
-      limits = c(0, 100) # Ensure the scale always runs from 0 to 100
-    ) +
-    labs(
-      title = paste(year, name, "MLB Percentile Rankings"),
-      x = "",
-      y = ""
-    ) +
-    coord_flip() +
-    theme_minimal() +
-    theme(
-      axis.text.y = element_text(size = 12),
-      axis.text.x = element_text(size = 12), # Displays x-axis text for the labels
-      axis.ticks = element_blank(), # Removes tick marks
-      axis.title = element_text(size = 14),
-      plot.title = element_text(size = 16, face = "bold"),
-      legend.position = "none" # Removes the legend
-    )
-  
-  return(percentile_plot)
-}
-
-```
-
-### Percentile Plot
-
-```{r}
-library(tidyverse)
-
-percentile_df <- nl_west |>
-  select(
-    game_year,
-    player_name,
-    pitch_name,
-    release_speed,
-    launch_speed,
-    woba_value,
-    bb_type, 
-    events
-  ) |>
-  summarise(
-    avg_exit_velo = mean(launch_speed, na.rm = TRUE),
-    woba_against = mean(woba_value, na.rm = TRUE),
-    gb_rate = sum(bb_type == "ground_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
-    fb_rate = sum(bb_type == "fly_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
-    ld_rate = sum(bb_type == "line_drive", na.rm = TRUE) / sum(!is.na(bb_type)),
-    k_rate = sum(events == "strikeout", na.rm = TRUE) / sum(!is.na(events)),
-    .by = c(game_year, player_name)
-  ) |>
-  ungroup() |>
-  group_by(game_year) |>
-  mutate(
-    percentile_avg_exit_velo = round(percent_rank(avg_exit_velo), 2) * 100,
-    percentile_woba_against = round(percent_rank(woba_against), 2) * 100,
-    percentile_gb_rate = round(percent_rank(gb_rate), 2) * 100,
-    percentile_fb_rate = round(percent_rank(fb_rate), 2) * 100,
-    percentile_ld_rate = round(percent_rank(ld_rate), 2) * 100,
-    percentile_k_rate = round(percent_rank(k_rate), 2) * 100
-  ) |>
-#want integer values for the plot
-  ungroup()
-
-
-
-```
 
 ### Percentile Function
 
@@ -793,6 +680,10 @@ percentile_profile <- function(data, name, year) {
 ```{r}
 percentile_profile(percentile_df, "Snell, Blake", 2024)
 ```
+This code defines a custom function, percentile_profile, that generates a detailed percentile ranking plot for a specified MLB player and year. Using the ggplot2, dplyr, and tidyr packages, the function first filters the dataset for the given player and year. It selects key metrics, including average exit velocity, weighted on-base average (wOBA), and various batted ball and strikeout rates, and reshapes them into a long format using pivot_longer. The reshaped data is organized into a specific order for the metrics, ensuring consistent and meaningful visualization.
+
+The plot itself is a horizontally-oriented bar chart enhanced with additional visual elements. Percentile scores are represented by colored bars, with the gradient transitioning from blue (low percentiles) to red (high percentiles), emphasizing performance variation. Each bar is annotated with its exact percentile value, and a central black-and-white circular marker highlights the percentile score on each bar. The y-axis is custom-labeled to indicate performance levels—“Poor,” “Average,” and “Great.” The coord_flip() function rotates the chart for better readability, and minimal styling ensures a clean, professional look. This function is highly effective for visually summarizing a player’s strengths and weaknesses across multiple performance metrics, making it a valuable tool for player evaluation and presentation.
+
 
 ## Discussion & Conclusion
 
