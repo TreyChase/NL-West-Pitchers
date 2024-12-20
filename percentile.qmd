@@ -1,0 +1,136 @@
+---
+title: "percentile"
+author: "Trey Chase"
+format: pdf
+editor: visual
+---
+
+#Percentile
+
+The purpose of this file is to obtain percentile rankings of every important stat for the selected mlb pitcher
+
+#Data Manipulation
+
+```{r percentile df}
+library(tidyverse)
+
+percentile_df <- nl_west |>
+  select(
+    game_year,
+    player_name,
+    pitch_name,
+    release_speed,
+    launch_speed,
+    woba_value,
+    bb_type, 
+    events
+  ) |>
+  summarise(
+    avg_exit_velo = mean(launch_speed, na.rm = TRUE),
+    woba_against = mean(woba_value, na.rm = TRUE),
+    gb_rate = sum(bb_type == "ground_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    fb_rate = sum(bb_type == "fly_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    ld_rate = sum(bb_type == "line_drive", na.rm = TRUE) / sum(!is.na(bb_type)),
+    k_rate = sum(events == "strikeout", na.rm = TRUE) / sum(!is.na(events)),
+    .by = c(game_year, player_name)
+  ) |>
+  ungroup() |>
+  group_by(game_year) |>
+  mutate(
+    percentile_avg_exit_velo = round(percent_rank(avg_exit_velo), 2) * 100,
+    percentile_woba_against = round(percent_rank(woba_against), 2) * 100,
+    percentile_gb_rate = round(percent_rank(gb_rate), 2) * 100,
+    percentile_fb_rate = round(percent_rank(fb_rate), 2) * 100,
+    percentile_ld_rate = round(percent_rank(ld_rate), 2) * 100,
+    percentile_k_rate = round(percent_rank(k_rate), 2) * 100
+  ) |>
+#want integer values for the plot
+  ungroup()
+
+
+
+```
+
+#Percentile Function
+
+```{r percentile profile}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+percentile_profile <- function(data, name, year) {
+  
+  # Prepare data for plotting
+  plot_data <- data |>
+    filter(player_name == name, game_year == year) |>
+    select(
+      `Avg Exit Velocity` = percentile_avg_exit_velo,
+      wOBA = percentile_woba_against,
+      `Ground Ball Rate` = percentile_gb_rate,
+      `Fly Ball Rate` = percentile_fb_rate,
+      `Line Drive Rate` = percentile_ld_rate,
+      `K Rate` = percentile_k_rate
+    ) |>
+    pivot_longer(
+      cols = everything(),
+      names_to = "Metric",
+      values_to = "Percentile"
+    )
+  
+  # Set the levels of Metric to ensure order
+  plot_data$Metric <- factor(
+    plot_data$Metric,
+    levels = c(
+      "Avg Exit Velocity",
+      "wOBA",
+      "Ground Ball Rate",
+      "Fly Ball Rate",
+      "Line Drive Rate",
+      "K Rate"
+    )
+  )
+  
+  # Create the plot
+  percentile_plot <- ggplot(plot_data, aes(x = Metric, y = Percentile)) +
+    geom_col(width = 0.5, aes(fill = Percentile)) + # Skinnier bars
+    geom_point(aes(x = Metric, y = Percentile), size = 10, color = "black", fill = "white", shape = 21) + # Circles
+    geom_text(aes(x = Metric, y = Percentile, label = Percentile), vjust = 0.5, color = "black", size = 3.5, fontface = "bold") + # Annotated values
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "grey",
+      high = "red",
+      midpoint = 50, # Middle point of the gradient
+      limits = c(0, 100)
+    ) +
+    scale_y_continuous(
+      breaks = c(0, 50, 100), # Always show breaks at 0, 50, and 100
+      labels = c("Poor", "Average", "Great"), # Custom labels for the breaks
+      limits = c(0, 100) # Ensure the scale always runs from 0 to 100
+    ) +
+    labs(
+      title = paste(year, name, "MLB Percentile Rankings"),
+      x = "",
+      y = ""
+    ) +
+    coord_flip() +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 12),
+      axis.text.x = element_text(size = 12), # Displays x-axis text for the labels
+      axis.ticks = element_blank(), # Removes tick marks
+      axis.title = element_text(size = 14),
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "none" # Removes the legend
+    )
+  
+  return(percentile_plot)
+}
+
+```
+
+#Example Output
+
+```{r}
+percentile_profile(percentile_df, "Snell, Blake", 2024)
+```
+
