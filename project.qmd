@@ -1,0 +1,809 @@
+---
+title: "MLB NL West Pitcher Profiles"
+execute: 
+  cache: true
+format: 
+  html:
+    self-contained: true
+author:
+- Trey Chase
+---
+
+## Setup
+
+```{r setup, include = FALSE, cache = TRUE}
+
+library(duckdb)
+library(tidyverse)
+library(ggforce)
+
+parquet_file = "https://huggingface.co/datasets/Jensen-holm/statcast-era-pitches/resolve/main/data/statcast_era_pitches.parquet"
+
+con = dbConnect(duckdb::duckdb(), dbdir = ":memory:") # Establish connection to in-memory DuckDB instance
+
+dbExecute(con, "INSTALL httpfs")
+dbExecute(con, "LOAD httpfs")
+
+dbExecute(con, paste0("CREATE OR REPLACE TABLE statcast AS SELECT * FROM read_parquet('", parquet_file, "')")) # Create virtual Statcast data table
+
+```
+
+## Introduction
+
+Since its implementation in 2015, Statcast has provided a wide range of statistics and visualizations that have transformed baseball analytics. With just a simple search, coaches, broadcasters, scouts, and even fans can access a comprehensive profile of any player from all their seasons. Statcast leverages motion sensors, computer vision, data manipulation, and other advanced techniques to gather cutting-edge information—so much so that it can sometimes feel overwhelming.
+
+For batters, Statcast groups its data into three main categories: batting, baserunning, and fielding. For pitchers, it provides detailed information not only on matchups but also on individual pitch types. Statcast even maintains a constantly updated leaderboard to highlight players who are excelling—or struggling—throughout the season. An example of a pitcher’s dashboard is available below:
+
+**Example Pitcher Profile:** [Logan Webb](https://baseballsavant.mlb.com/savant-player/logan-webb-657277?stats=statcast-r-pitching-mlb)
+
+Our project aims to emulate this type of pitcher dashboard using a Shiny app in R, enabling anyone interested in analytics to easily explore a chosen pitcher’s data and understand their tendencies over time. The dataset we used is provided by Jensen Holm on Hugging Face, who updates it weekly with the latest game logs. Detailed feature documentation is also available:
+
+-   **Dataset:** [Jensen-holm/statcast-era-pitches](https://huggingface.co/datasets/Jensen-holm/statcast-era-pitches/viewer)\
+-   **Documentation:** [Baseball Savant CSV Docs](https://baseballsavant.mlb.com/csv-docs)
+
+Given the large size of the dataset and the constraints of our project, we narrowed our scope to pitchers from the National League West Division between 2020 and 2024. Our app offers several key visualizations and summaries:
+
+-   **Location Profile:** A heatmap showing pitch locations for a selected pitcher.
+-   **Velocity Profile:** A distribution of pitch speeds.
+-   **Movement Profile:** A plot illustrating the vertical and horizontal break of each pitch on a Cartesian plane.
+-   **Pitch Usage Table:** A summary of pitch types, including counts and frequencies.
+
+Users can dynamically select the player, season, and team of interest, and the app will render all these plots for easy interpretation. This approach helps bridge the gap between data scientists and coaches in the sports industry by presenting complex data in a clear, actionable format. It also allows opposing teams to generate scouting reports and develop effective game plans, ultimately contributing to a more informed and competitive environment.
+
+## Methods / Implementation
+
+## Narrative:
+
+We initially attempted to load the `statcast-era-pitches` dataset into our repository using the tidyverse method (`read_parquet`) in the documentation on Hugging Face. As noted above, the off-the-shelf dataset is quite large (652 MB), and the execution time for this method was impractical for our purposes. As a more efficient alternative, we chose to connect to an in-memory DuckDB instance and create a virtual data table by accessing the remote HTTP-based Parquet file hosted on the Hugging Face website. Leveraging DuckDB allows us to access and interact with the Statcast data without downloading it to our local environment, which is far more computationally efficient than other documented alternatives. Once the database connection is established and the virtual table is created, we filter the data to the teams and years of interest in this project (i.e., NL West teams in the years 2020-2024) before collecting the data to our R environment. The resultant data table `nl_west` contains 556,808 rows; this is \~8% of the size of the original Statcast dataset (7M+ rows).
+
+**Pitch Type Map Writeup**
+
+In order to make the visuals more readable, we created a vector that matches the pitch type abbreviations to their full names, as well as a data frame that we joined to all the plot labellers. We used the mlb pitch type glossary to determine all the mappings.
+
+[MLB Pitch Type Glossary](https://www.mlb.com/glossary/pitch-types)
+
+## Function Documentation
+
+**Pitching Location Profile Writeup**
+
+These two functions, `geom_strikezone()` and `location_plot()`, are designed for visualizing baseball pitches relative to the strike zone using `ggplot2`. The `geom_strikezone()` function draws a standardized rectangular strike zone on a plot, defined by top and bottom boundaries, and uses a calculated plate width to determine the zone’s left and right edges. Note that the height of the strike zone is determined by the player's height, but the strikezone is generalized with these measurements.
+
+The `location_plot()` function provides a detailed visualization of a pitcher’s pitch distribution within the strike zone over a given season. After filtering the dataset for the specified player and year, it uses `ggplot2` to create a multi-faceted density plot of pitch locations, separated by pitch type. Each facet represents a distinct pitch type, enabling analysts to compare how different pitches are located both horizontally and vertically across the plate. By default, the plot displays the strike zone as a simple black rectangle, ensuring that pitch density is immediately contextualized relative to the canonical strike zone boundaries. The color gradient ranges from white (low density) to red (high density), highlighting areas where the pitcher consistently locates each type of pitch.
+
+The function further refines the data by excluding pitch types thrown fewer than five times to avoid cluttering the plot with unreliable estimates. Before plotting, the data is joined with a pitch type names dataset (`pitch_types_df`), ensuring that each facet is clearly labeled with a human-readable pitch name rather than just a code. The visualization uses `stat_density_2d` to transform raw pitch coordinates into a smooth density surface, revealing spatial tendencies that may not be obvious from raw scatterplots alone. Consequently, `location_plot()` not only aids coaches and analysts in understanding a pitcher’s strategic approach—such as clustering certain pitches in one corner of the zone—but also provides a foundation for deeper quantitative analysis, like comparing pitch usage patterns across seasons or relative to specific opposing batters.
+
+**Pitching Velocity Profile Writeup**
+
+The goal of the velocity profile function is to generate a plot of pitch speed density curves (both by pitch type and in aggregate) for a user-specified player in a given year. We first ensure that the input dataset contains the required columns for this analysis, and that the user's player of interest exists in the input dataset; if either of these prerequisites are not met, the function will quit and provide the user with a meaningful error message. We then preprocess the data by limiting the dataset to those pitch types with at least 5 pitches on record for the chosen player in the chosen year, and filtering the data to only those columns of interest (3 vs. the 113 columns in the full dataset). Next, we match the pitch-type abbreviations in our dataset to the full pitch name using the previously defined `pitch_types_df`. The next four lines of code duplicate the current data table for use in generating density curve data across all pitch types; we store the point of maxima on this density curve (with a bit of cushion on the y-axis) for use in the `ggplot` function.
+
+The first layer of the subsequent `ggplot` code generates density curve for each pitch-type on record for the selected player, while the second layer generates a single density curve (dashed line) for all pitches thrown by the selected player in the selected year. We then reference the point of maxima previously stored for the "All Pitches" density curve to add a label to the plot identifying the dashed line. The final bit of code is used to add meaningful axis labels and a relevant title to the plot, as well as clean up a few aesthetic plot elements (i.e., legend appearance). We provide a sample output for Logan Webb in the following code chunk; not that the vertical range of the density curves by pitch-type is wider than that of the single density curve across all pitch-types; this is because the density curves by pitch-type are relative to the count of pitches by pitch-type, rather than the total pitch count across all pitch-types.
+
+**Pitching Movement Profile Writeup**
+
+The `movement_profile()` function visualizes the horizontal and vertical movement of a pitcher’s pitches over a specified season, providing insight into the shape and direction of each pitch type. After confirming that the input data contains the necessary columns and corresponds to a chosen player and year, the function extracts movement components (`pfx_x` and `pfx_z`) and joins them with a pitch type dictionary to display full pitch names. It converts these movement measures from feet to inches for finer granularity and a more intuitive scale. Randomly sampling up to 200 pitches, the function ensures a clean, uncluttered view of how each pitch moves relative to the plate’s centerline.
+
+On the resulting plot, the origin (`0,0`) represents a pitch with no lateral or vertical movement. Concentric circles at predefined intervals help contextualize how far each pitch deviates, and the axes are labeled in inches to highlight even subtle differences. Each pitch type is color-coded, allowing for quick comparisons among different offerings in the pitcher’s repertoire. By presenting both horizontal and vertical breaks in a single space, `movement_profile()` helps analysts, coaches, and players understand a pitcher’s movement profile at a glance, informing decisions about pitch usage, sequencing, and adjustments.
+
+**Pitch Usage Table Writeup**
+
+The `pitch_usage_table()` function calculates and displays how often a specified pitcher used each of their pitches during a given season. It filters the input dataset for the chosen player and year, counts the number of times each pitch type was thrown, and excludes pitch types with fewer than five pitches. The result is then formatted into a table showing both the raw counts and percentages of usage for each pitch, making it easy to quickly assess the player’s pitch mix. If no valid data is available, the function returns an empty table or `NULL`.
+
+**Shiny App Writeup**
+
+Building the Shiny app (`app.R`) involved translating analytical workflows and visualizations into an interactive and user-friendly interface. To begin, we load the functions `location_plot()`, `velocity_profile()`, `movement_profile()` and `pitch_usage_table()` using `knitr::purl()` from the `Functions.qmd`. This makes them available in the app and keeps the code organized. For the data to be available it is important to run `project.qmd` first. We initially tried to include the loading of the data into `app.R`. However, due to the size of the data frame, this caused R and the app to crash regularly. By loading it in a separate environment we were able to avoid this.
+
+We structured the app's functionality into two main components: the UI and the server, ensuring that all data processing occurred in a reactive framework. The UI features a sidebar panel that includes dropdown menus for selecting teams, years, and players, alongside a "Get dashboard“ action button and a visual of the selected team’s logo. This logo is rendered dynamically based on the selected team, using `geom_mlb_logos()`. The player dropdown is dynamically updated based on the selected team and year. Here we use the `renderUI()` function in combination with `reactive()` and `observeEvent()`, to ensure that only valid players corresponding to the other inputs are shown. Additionally, when a player is selected and the user then updates his selection of the year or team, the dropdown dynamically updates the selected player using `updateSelectInput()`, ensuring that the previous player selection persists as long as he continues to be available in the dropdown and only defaults to the player whose name comes first in the alphabet if not. The visualizations and summary tables are generated by calling the functions loaded at the beginning once the action button is pressed using `eventReactive()` and displayed in separate panels using `tabPanel()`.
+
+For some players, no pitching data is available, resulting in no output. To handle this more gracefully, we used `validate()` and `need()` to display a meaningful message to the user.
+
+Key challenges in building this app included dynamically updating player options based on team and year selections, ensuring the player selection was only adjusted when necessary after changes to these inputs, and providing informative messages in cases of insufficient data.
+
+## Code:
+
+```{r}
+#| label: final_proj
+#| message: false
+
+nl_west = tbl(con, "statcast") |>
+  filter(((home_team %in% c("SF", "SD", "LAD", "COL", "AZ") & inning_topbot == "Top")|
+            (away_team %in% c("SF", "SD", "LAD", "COL", "AZ") & inning_topbot == "Bot" )) &
+           game_year >= 2020 & game_year <= 2024) |>
+  collect()
+
+```
+
+### Pitch Type Map (Full Names)
+
+```{r pitch types}
+## Named vector of pitch types
+pitch_types = c(
+  "CH" = "Changeup",
+  "CU" = "Curveball",
+  "FC" = "Cutter",
+  "EP" = "Eephus",
+  "FO" = "Forkball",
+  "FF" = "Four-Seam Fastball",
+  "KN" = "Knuckleball",
+  "KC" = "Knuckle-curve",
+  "SC" = "Screwball",
+  "SI" = "Sinker",
+  "SL" = "Slider",
+  "SV" = "Slurve",
+  "FS" = "Splitter",
+  "ST" = "Sweeper"
+)
+
+## Convert to a data frame suitable for joining
+pitch_types_df = data.frame(
+  pitch_type = names(pitch_types),
+  pitch_name = unname(pitch_types),
+  stringsAsFactors = FALSE
+)
+
+pitch_types_df
+
+```
+
+### Pitching Location Profile
+
+```{r pitching location profile}
+## Defining the strikezone
+geom_strikezone = function(sz_top = 3.8, sz_bot = 1.1) {
+  plate_width = 17 + 2 * (9 / pi)
+  sz_left = -(plate_width / 2) / 12
+  sz_right = (plate_width / 2) / 12
+  strikezone = data.frame(
+    x = c(sz_left, sz_left, sz_right, sz_right, sz_left),
+    y = c(sz_bot, sz_top, sz_top, sz_bot, sz_bot)
+  )
+  geom_path(
+    mapping = aes(x, y),
+    data = strikezone,
+    linewidth = 0.5,
+    linetype = 1,
+    color = "black"
+  )
+}
+
+## Define the location plot
+location_plot = function(data, name, year) {
+  
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "plate_x", "plate_z", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  ## Filter and prepare the data
+  plot_data = data |>
+    filter(player_name == name,
+           game_year == year) |>
+    group_by(pitch_type) |>
+    mutate(pitch_count = n()) |>
+    filter(pitch_count >= 5) |> # Exclude pitch types with fewer than 5 pitches
+    ungroup() |>
+    select(
+      pitch_type,
+      plate_x,
+      plate_z
+    ) |>
+    drop_na()
+  
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Join pitch type names
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+  
+  ## Create the density plot using stat_density_2d
+  ggplot(plot_data, aes(x = plate_x, y = plate_z)) +
+    stat_density_2d(
+      aes(fill = after_stat(ndensity)),
+      geom = "raster",
+      contour = FALSE
+    ) +
+    scale_fill_gradientn(
+      colors = c("white", "blue", "red"),
+      values = scales::rescale(c(0, 0.5, 1)),
+      name = "Density"
+    ) +
+    geom_strikezone() +
+    xlim(c(-3, 3)) +
+    ylim(c(-2, 6)) +
+    xlab("Horizontal Location (ft)") +
+    ylab("Vertical Location (ft)") +
+    theme_minimal(base_size = 14) +
+    coord_fixed() +
+    facet_wrap(vars(pitch_name)) +  # Use full pitch names for facet labels
+    theme(
+      panel.grid = element_blank(),
+      strip.text = element_text(color = "black"),
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black"),
+      legend.title = element_text(color = "black"),
+      legend.text = element_text(color = "black")
+    ) + 
+    theme_bw()
+}
+
+```
+
+#### Example Output
+
+```{r}
+#| label: location_plot
+#| warning: false
+location_plot(nl_west, "Webb, Logan", 2020) # Location plot for Logan Webb
+```
+
+### Velocity Profile
+
+```{r velocity profile}
+
+velocity_profile = function(data, name, year) {
+
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "release_speed", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+
+  ## Filter and prepare the data
+  plot_data =
+    data |>
+    filter(player_name == name,
+           game_year == year) |>
+    group_by(pitch_type) |>
+    mutate(pitch_count = n()) |>
+    filter(pitch_count >= 5) |>  # Exclude pitch types with fewer than 5 pitches
+    ungroup() |>
+    select(
+      pitch_type,
+      player_name,
+      release_speed
+    ) |>
+    drop_na()
+
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+
+  ## Join to get full pitch names
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+
+  ## This dataset represents all selected pitches combined
+  plot_data_all = plot_data
+
+  all_pitch_density = density(plot_data_all$release_speed)
+  max_y = max(all_pitch_density$y) * 105
+  max_x = all_pitch_density$x[which.max(all_pitch_density$y)]
+
+  ## Create the density plot
+  p = ggplot(plot_data) +
+    ## Individual pitch type densities (using pitch_name for fill/color)
+    geom_density(
+      aes(
+        x = release_speed,
+        fill = pitch_name,
+        color = pitch_name,
+        y = after_stat(density) * 100  # Scale density to percentages
+      ),
+      alpha = 0.5,
+      show.legend = c(fill = TRUE, color = FALSE)
+    ) +
+    ## Overall pitch density line
+    geom_density(
+      data = plot_data_all,
+      aes(
+        x = release_speed,
+        y = after_stat(density) * 100
+      ),
+      color = "black",
+      linetype = "dashed",
+      size = 0.5,
+      inherit.aes = FALSE,
+      show.legend = FALSE
+    ) +
+    ## Annotation for overall pitch line
+   annotate(
+      "text",
+      x = max_x,
+      y = max_y + 1,
+      label = "--- All Pitches",
+      color = "black",
+      fontface = "bold",
+      size = 3
+    ) +
+    theme_bw() +
+    xlim(c(70, 100)) +
+    scale_y_continuous(
+      name = "Density (%)",
+      labels = scales::percent_format(scale = 1)  # Keep y-axis in percentage format
+    ) +
+    xlab("Pitch Speed (mph)") +
+    ylab("Frequency of Speed") +
+    labs(
+      fill = "Pitch Type",
+      title = paste("Velocity Profile for", name, year)
+    ) +
+    ## Remove dashed line bordering legend keys
+    theme(
+      legend.key = element_rect(fill = NA, color = NA)
+    )
+
+  return(p)
+}
+
+```
+
+#### Example Output
+
+```{r}
+#| label: velocity_profile
+#| warning: false
+
+velocity_profile(nl_west, "Webb, Logan", 2024) # Velocity plot for Logan Webb
+```
+
+### Movement Profile
+
+```{r movement profile}
+movement_profile = function(data, name, year) {
+  
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "release_speed", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  plot_data = data |>
+    select(
+      pitch_type,
+      player_name,
+      game_year,
+      pfx_x, # horizontal break
+      pfx_z  # vertical break
+    ) |>
+    filter(player_name == name,
+           game_year == year) |>
+    drop_na()
+  
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Join pitch name mapping
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+  
+  plot_data |>
+    mutate(hb = -12 * pfx_x) |>   # Convert horizontal break to inches
+    mutate(ivb = 12 * pfx_z) |>   # Convert vertical break to inches
+    slice_sample(n = 200) |>
+    ggplot() +
+    aes(x = hb,
+        y = ivb,
+        colour = pitch_name   # Use the full pitch name here
+    ) +
+    geom_hline(yintercept = 0, linewidth = 0.1) +
+    geom_vline(xintercept = 0, linewidth = 0.1) +
+    geom_circle(
+      data = data.frame(
+        x0 = 0,
+        y0 = 0,
+        r = 6 * 1:4,
+        lt = factor(c(2, 1, 2, 1))
+      ),
+      mapping = aes(
+        x0 = x0,
+        y0 = y0,
+        r = r,
+        linetype = lt
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.25,
+      show.legend = FALSE
+    ) +
+    geom_point(
+      alpha = 1,
+      size = 2
+    ) +
+    geom_text(
+      data = data.frame(
+        x = c(-22, -16, -10, -4),
+        y = 1,
+        text = c("24\"", "18\"", "12\"", "6\"")
+      ),
+      mapping = aes(x = x, y = y, label = text),
+      inherit.aes = FALSE,
+      family = "mono"
+    ) +
+    scale_x_continuous(limits = c(-24, 24), breaks = 12 * -2:2) +
+    scale_y_continuous(limits = c(-24, 24), breaks = 12 * -2:2) +
+    theme_void() +
+    coord_fixed() +
+    xlab("Horizontal Break (Inches)") +
+    ylab("Induced Vertical Break (Inches)") +
+    labs(
+      colour = "Pitch Type",
+      title = paste("Movement Profile for", name, year)
+    )
+}
+
+```
+
+#### Example Output
+
+```{r}
+movement_profile(nl_west, "Webb, Logan", 2023) # Movement profile for Logan Webb
+```
+
+### Pitch Usage Table
+
+```{r pitch usage table}
+pitch_usage_table = function(data, name, year) {
+  
+  ## Error checks
+  required_columns = c("pitch_type", "player_name", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  ## Filter data for the specified player and drop NA
+  player_data = data |>
+    filter(player_name == name,
+           game_year == year) |>
+    drop_na(pitch_type)
+  
+  if (nrow(player_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Count the number of pitches by pitch_type
+  usage_counts = player_data |>
+    group_by(pitch_type) |>
+    summarize(count = n(), .groups = "drop") |>
+    filter(count >= 5)  # Include only pitch types with at least 5 pitches thrown
+  
+  ## If no pitches remain, return an empty table
+  if (nrow(usage_counts) == 0) {
+    message(paste("No pitch types with >=5 pitches for", name))
+    return(tibble())
+  }
+  
+  # Calculate percentage
+  total_pitches = sum(usage_counts$count)
+  
+  usage_counts = usage_counts |>
+    mutate(
+      percentage = round((count / total_pitches) * 100, 1)
+    ) |>
+    rename(Count = count, Percentage = percentage) |>
+    left_join(pitch_types_df, by = "pitch_type") |>
+    select(pitch_name, Count, Percentage)
+  
+  ## Convert to a wide format with pitch types as columns
+  usage_wide = usage_counts |>
+    pivot_longer(
+      cols = c(Count, Percentage), 
+      names_to = "METRIC", 
+      values_to = "VALUE"
+    ) |>
+    pivot_wider(
+      names_from = pitch_name,
+      values_from = VALUE
+    )
+  
+  ## Print a title before returning the table
+  title_text = paste("Pitch Usage for", name, year)
+  message(title_text)
+  
+  return(usage_wide)
+}
+
+```
+
+#### Example Output
+
+```{r}
+pitch_usage_table(nl_west, "Webb, Logan", 2024) # Pitch usage table for Logan Webb
+```
+# Percentile Data
+
+```{r}
+library(tidyverse)
+
+percentile_df <- nl_west |>
+  select(
+    game_year,
+    player_name,
+    pitch_name,
+    release_speed,
+    launch_speed,
+    woba_value,
+    bb_type, 
+    events
+  ) |>
+  summarise(
+    avg_exit_velo = mean(launch_speed, na.rm = TRUE),
+    woba_against = mean(woba_value, na.rm = TRUE),
+    gb_rate = sum(bb_type == "ground_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    fb_rate = sum(bb_type == "fly_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    ld_rate = sum(bb_type == "line_drive", na.rm = TRUE) / sum(!is.na(bb_type)),
+    k_rate = sum(events == "strikeout", na.rm = TRUE) / sum(!is.na(events)),
+    .by = c(game_year, player_name)
+  ) |>
+  ungroup() |>
+  group_by(game_year) |>
+  mutate(
+    percentile_avg_exit_velo = round(percent_rank(avg_exit_velo), 2) * 100,
+    percentile_woba_against = round(percent_rank(woba_against), 2) * 100,
+    percentile_gb_rate = round(percent_rank(gb_rate), 2) * 100,
+    percentile_fb_rate = round(percent_rank(fb_rate), 2) * 100,
+    percentile_ld_rate = round(percent_rank(ld_rate), 2) * 100,
+    percentile_k_rate = round(percent_rank(k_rate), 2) * 100
+  ) |>
+#want integer values for the plot
+  ungroup()
+
+
+
+```
+
+### Percentile Function
+
+```{r percentile profile}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+percentile_profile <- function(data, name, year) {
+  
+  # Prepare data for plotting
+  plot_data <- data |>
+    filter(player_name == name, game_year == year) |>
+    select(
+      `Avg Exit Velocity` = percentile_avg_exit_velo,
+      wOBA = percentile_woba_against,
+      `Ground Ball Rate` = percentile_gb_rate,
+      `Fly Ball Rate` = percentile_fb_rate,
+      `Line Drive Rate` = percentile_ld_rate,
+      `K Rate` = percentile_k_rate
+    ) |>
+    pivot_longer(
+      cols = everything(),
+      names_to = "Metric",
+      values_to = "Percentile"
+    )
+  
+  # Set the levels of Metric to ensure order
+  plot_data$Metric <- factor(
+    plot_data$Metric,
+    levels = c(
+      "Avg Exit Velocity",
+      "wOBA",
+      "Ground Ball Rate",
+      "Fly Ball Rate",
+      "Line Drive Rate",
+      "K Rate"
+    )
+  )
+  
+  # Create the plot
+  percentile_plot <- ggplot(plot_data, aes(x = Metric, y = Percentile)) +
+    geom_col(width = 0.5, aes(fill = Percentile)) + # Skinnier bars
+    geom_point(aes(x = Metric, y = Percentile), size = 10, color = "black", fill = "white", shape = 21) + # Circles
+    geom_text(aes(x = Metric, y = Percentile, label = Percentile), vjust = 0.5, color = "black", size = 3.5, fontface = "bold") + # Annotated values
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "grey",
+      high = "red",
+      midpoint = 50, # Middle point of the gradient
+      limits = c(0, 100)
+    ) +
+    scale_y_continuous(
+      breaks = c(0, 50, 100), # Always show breaks at 0, 50, and 100
+      labels = c("Poor", "Average", "Great"), # Custom labels for the breaks
+      limits = c(0, 100) # Ensure the scale always runs from 0 to 100
+    ) +
+    labs(
+      title = paste(year, name, "MLB Percentile Rankings"),
+      x = "",
+      y = ""
+    ) +
+    coord_flip() +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 12),
+      axis.text.x = element_text(size = 12), # Displays x-axis text for the labels
+      axis.ticks = element_blank(), # Removes tick marks
+      axis.title = element_text(size = 14),
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "none" # Removes the legend
+    )
+  
+  return(percentile_plot)
+}
+
+```
+
+### Percentile Plot
+
+```{r}
+library(tidyverse)
+
+percentile_df <- nl_west |>
+  select(
+    game_year,
+    player_name,
+    pitch_name,
+    release_speed,
+    launch_speed,
+    woba_value,
+    bb_type, 
+    events
+  ) |>
+  summarise(
+    avg_exit_velo = mean(launch_speed, na.rm = TRUE),
+    woba_against = mean(woba_value, na.rm = TRUE),
+    gb_rate = sum(bb_type == "ground_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    fb_rate = sum(bb_type == "fly_ball", na.rm = TRUE) / sum(!is.na(bb_type)),
+    ld_rate = sum(bb_type == "line_drive", na.rm = TRUE) / sum(!is.na(bb_type)),
+    k_rate = sum(events == "strikeout", na.rm = TRUE) / sum(!is.na(events)),
+    .by = c(game_year, player_name)
+  ) |>
+  ungroup() |>
+  group_by(game_year) |>
+  mutate(
+    percentile_avg_exit_velo = round(percent_rank(avg_exit_velo), 2) * 100,
+    percentile_woba_against = round(percent_rank(woba_against), 2) * 100,
+    percentile_gb_rate = round(percent_rank(gb_rate), 2) * 100,
+    percentile_fb_rate = round(percent_rank(fb_rate), 2) * 100,
+    percentile_ld_rate = round(percent_rank(ld_rate), 2) * 100,
+    percentile_k_rate = round(percent_rank(k_rate), 2) * 100
+  ) |>
+#want integer values for the plot
+  ungroup()
+
+
+
+```
+
+### Percentile Function
+
+```{r percentile profile}
+percentile_profile <- function(data, name, year) {
+  # Filter data for the selected player and year
+  player_data <- data |> filter(player_name == name, game_year == year)
+  
+  # Check if the player has enough data
+  if (nrow(player_data) == 0) {
+    return(
+      ggplot() +
+        annotate("text", x = 0.5, y = 0.5, label = "Not enough pitches to generate percentile data.", 
+                 hjust = 0.5, vjust = 0.5, size = 5, fontface = "bold") +
+        theme_void()
+    )
+  }
+  
+  # Prepare data for plotting
+  plot_data <- player_data |>
+    select(
+      `Avg Exit Velocity` = percentile_avg_exit_velo,
+      wOBA = percentile_woba_against,
+      `Ground Ball Rate` = percentile_gb_rate,
+      `Fly Ball Rate` = percentile_fb_rate,
+      `Line Drive Rate` = percentile_ld_rate,
+      `K Rate` = percentile_k_rate
+    ) |>
+    pivot_longer(
+      cols = everything(),
+      names_to = "Metric",
+      values_to = "Percentile"
+    )
+  
+  # Set the levels of Metric to ensure order
+  plot_data$Metric <- factor(
+    plot_data$Metric,
+    levels = c(
+      "Avg Exit Velocity",
+      "wOBA",
+      "Ground Ball Rate",
+      "Fly Ball Rate",
+      "Line Drive Rate",
+      "K Rate"
+    )
+  )
+  
+  # Create the plot
+  percentile_plot <- ggplot(plot_data, aes(x = Metric, y = Percentile)) +
+    geom_col(width = 0.5, aes(fill = Percentile)) + # Skinnier bars
+    geom_point(aes(x = Metric, y = Percentile), size = 10, color = "black", fill = "white", shape = 21) + # Circles
+    geom_text(aes(x = Metric, y = Percentile, label = Percentile), vjust = 0.5, color = "black", size = 3.5, fontface = "bold") + # Annotated values
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "grey",
+      high = "red",
+      midpoint = 50,
+      limits = c(0, 100)
+    ) +
+    scale_y_continuous(
+      breaks = c(0, 50, 100),
+      labels = c("Poor", "Average", "Great"),
+      limits = c(0, 100)
+    ) +
+    labs(
+      title = paste(year, name, "MLB Percentile Rankings"),
+      x = "",
+      y = ""
+    ) +
+    coord_flip() +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 12),
+      axis.text.x = element_text(size = 12),
+      axis.ticks = element_blank(),
+      axis.title = element_text(size = 14),
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "none"
+    )
+  
+  return(percentile_plot)
+}
+
+
+```
+
+#### Example Output
+
+```{r}
+percentile_profile(percentile_df, "Snell, Blake", 2024)
+```
+
+## Discussion & Conclusion
+
+Our project successfully demonstrated the power of modern baseball analytics through the development of an accessible Shiny application focused on NL West pitchers. The app provides users with quick, interpretable results that can inform both strategic decision-making and player analysis.
+
+The most straightforward expansion would be broadening our dataset to include all MLB pitchers, significantly increasing the app's utility and reach. This would transform it from a division-specific tool into a comprehensive league-wide resource.
+
+Our existing visualizations and tables also present several opportunities for refinement. The pitch usage analysis could be enriched by incorporating batter handedness data and/or pitch count situations, and adding contextual game states. These enhancements would provide deeper insights into pitchers' tendencies under specific conditions, enabling more informed strategic decisions for both coaches and players.
+
+A particularly valuable addition would be the implementation of time series analysis to track metrics such as pitch type usage trends, velocity variations over time, and movement profile changes. Such temporal analysis could reveal crucial patterns including seasonal adjustments, performance trends, and potential early warning signs of fatigue or injury.
+
+One ambitious enhancement would be incorporating Statcast-style percentile rankings for key player statistics. While this would require significant additional data processing and computational resources, including extensive player statistics aggregation, generation of comparative metrics, and development of percentile calculation systems, the resulting insights would provide invaluable context about how players compare to their peers.
+
+This project has laid a solid foundation for a sophisticated baseball analytics tool, demonstrating the potential of modern data science techniques in sports analysis. While our current implementation successfully serves its core purpose, the identified enhancement opportunities could transform it into an even more powerful resource for players, coaches, and analysts throughout professional baseball.

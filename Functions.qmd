@@ -1,0 +1,451 @@
+```{r functions}
+## Named vector of pitch types
+pitch_types = c(
+  "CH" = "Changeup",
+  "CU" = "Curveball",
+  "FC" = "Cutter",
+  "EP" = "Eephus",
+  "FO" = "Forkball",
+  "FF" = "Four-Seam Fastball",
+  "KN" = "Knuckleball",
+  "KC" = "Knuckle-curve",
+  "SC" = "Screwball",
+  "SI" = "Sinker",
+  "SL" = "Slider",
+  "SV" = "Slurve",
+  "FS" = "Splitter",
+  "ST" = "Sweeper"
+)
+
+## Convert to a data frame suitable for joining
+pitch_types_df = data.frame(
+  pitch_type = names(pitch_types),
+  pitch_name = unname(pitch_types),
+  stringsAsFactors = FALSE
+)
+## Defining the strikezone
+geom_strikezone = function(sz_top = 3.8, sz_bot = 1.1) {
+  plate_width = 17 + 2 * (9 / pi)
+  sz_left = -(plate_width / 2) / 12
+  sz_right = (plate_width / 2) / 12
+  strikezone = data.frame(
+    x = c(sz_left, sz_left, sz_right, sz_right, sz_left),
+    y = c(sz_bot, sz_top, sz_top, sz_bot, sz_bot)
+  )
+  geom_path(
+    mapping = aes(x, y),
+    data = strikezone,
+    linewidth = 0.5,
+    linetype = 1,
+    color = "black"
+  )
+}
+
+## Define the location plot
+location_profile = function(data, name, year) {
+  
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "plate_x", "plate_z", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  ## Filter and prepare the data
+  plot_data = data |>
+    filter(player_name == name,
+           game_year == year) |>
+    group_by(pitch_type) |>
+    mutate(pitch_count = n()) |>
+    filter(pitch_count >= 5) |> # Exclude pitch types with fewer than 5 pitches
+    ungroup() |>
+    select(
+      pitch_type,
+      plate_x,
+      plate_z
+    ) |>
+    drop_na()
+  
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Join pitch type names
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+  
+  ## Create the density plot using stat_density_2d
+  ggplot(plot_data, aes(x = plate_x, y = plate_z)) +
+    stat_density_2d(
+      aes(fill = after_stat(ndensity)),
+      geom = "raster",
+      contour = FALSE
+    ) +
+    scale_fill_gradientn(
+      colors = c("white", "blue", "red"),
+      values = scales::rescale(c(0, 0.5, 1)),
+      name = "Density"
+    ) +
+    geom_strikezone() +
+    xlim(c(-3, 3)) +
+    ylim(c(-2, 6)) +
+    xlab("Horizontal Location (ft)") +
+    ylab("Vertical Location (ft)") +
+    theme_minimal(base_size = 14) +
+    coord_fixed() +
+    facet_wrap(vars(pitch_name)) +  # Use full pitch names for facet labels
+    theme(
+      panel.grid = element_blank(),
+      strip.text = element_text(color = "black"),
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black"),
+      legend.title = element_text(color = "black"),
+      legend.text = element_text(color = "black")
+    ) + 
+    theme_bw()
+}
+
+velocity_profile = function(data, name, year) {
+
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "release_speed", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+
+  ## Filter and prepare the data
+  plot_data =
+    data |>
+    filter(player_name == name,
+           game_year == year) |>
+    group_by(pitch_type) |>
+    mutate(pitch_count = n()) |>
+    filter(pitch_count >= 5) |>  # Exclude pitch types with fewer than 5 pitches
+    ungroup() |>
+    select(
+      pitch_type,
+      player_name,
+      release_speed
+    ) |>
+    drop_na()
+
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+
+  ## Join to get full pitch names
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+
+  ## This dataset represents all selected pitches combined
+  plot_data_all = plot_data
+
+  all_pitch_density = density(plot_data_all$release_speed)
+  max_y = max(all_pitch_density$y) * 105
+  max_x = all_pitch_density$x[which.max(all_pitch_density$y)]
+
+  # Create the density plot
+  p = ggplot(plot_data) +
+    ## Individual pitch type densities (using pitch_name for fill/color)
+    geom_density(
+      aes(
+        x = release_speed,
+        fill = pitch_name,
+        color = pitch_name,
+        y = after_stat(density) * 100  # Scale density to percentages
+      ),
+      alpha = 0.5,
+      show.legend = c(fill = TRUE, color = FALSE)
+    ) +
+    ## Overall pitch density line
+    geom_density(
+      data = plot_data_all,
+      aes(
+        x = release_speed,
+        y = after_stat(density) * 100
+      ),
+      color = "black",
+      linetype = "dashed",
+      size = 0.5,
+      inherit.aes = FALSE,
+      show.legend = FALSE
+    ) +
+    ## Annotation for overall pitch line
+   annotate(
+      "text",
+      x = max_x,
+      y = max_y + 1,
+      label = "--- All Pitches",
+      color = "black",
+      fontface = "bold",
+      size = 3
+    ) +
+    theme_bw() +
+    xlim(c(70, 100)) +
+    scale_y_continuous(
+      name = "Density (%)",
+      labels = scales::percent_format(scale = 1)  # Keep y-axis in percentage format
+    ) +
+    xlab("Pitch Speed (mph)") +
+    ylab("Frequency of Speed") +
+    labs(
+      fill = "Pitch Type",
+      title = paste("Velocity Profile for", name, year)
+    ) +
+    ## Remove dashed line bordering legend keys
+    theme(
+      legend.key = element_rect(fill = NA, color = NA)
+    )
+
+  return(p)
+}
+
+movement_profile = function(data, name, year) {
+  
+  ## Error checks for data
+  required_columns = c("pitch_type", "player_name", "release_speed", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  ## Error check for player_name
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  plot_data = data |>
+    select(
+      pitch_type,
+      player_name,
+      game_year,
+      pfx_x, # horizontal break
+      pfx_z  # vertical break
+    ) |>
+    filter(player_name == name,
+           game_year == year) |>
+    drop_na()
+  
+  if (nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Join pitch name mapping
+  plot_data = plot_data |>
+    left_join(pitch_types_df, by = "pitch_type")
+  
+  plot_data |>
+    mutate(hb = -12 * pfx_x) |>   # Convert horizontal break to inches
+    mutate(ivb = 12 * pfx_z) |>   # Convert vertical break to inches
+    slice_sample(n = 200) |>
+    ggplot() +
+    aes(x = hb,
+        y = ivb,
+        colour = pitch_name   # Use the full pitch name here
+    ) +
+    geom_hline(yintercept = 0, linewidth = 0.1) +
+    geom_vline(xintercept = 0, linewidth = 0.1) +
+    geom_circle(
+      data = data.frame(
+        x0 = 0,
+        y0 = 0,
+        r = 6 * 1:4,
+        lt = factor(c(2, 1, 2, 1))
+      ),
+      mapping = aes(
+        x0 = x0,
+        y0 = y0,
+        r = r,
+        linetype = lt
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.25,
+      show.legend = FALSE
+    ) +
+    geom_point(
+      alpha = 1,
+      size = 2
+    ) +
+    geom_text(
+      data = data.frame(
+        x = c(-22, -16, -10, -4),
+        y = 1,
+        text = c("24\"", "18\"", "12\"", "6\"")
+      ),
+      mapping = aes(x = x, y = y, label = text),
+      inherit.aes = FALSE,
+      family = "mono"
+    ) +
+    scale_x_continuous(limits = c(-24, 24), breaks = 12 * -2:2) +
+    scale_y_continuous(limits = c(-24, 24), breaks = 12 * -2:2) +
+    theme_void() +
+    coord_fixed() +
+    xlab("Horizontal Break (Inches)") +
+    ylab("Induced Vertical Break (Inches)") +
+    labs(
+      colour = "Pitch Type",
+      title = paste("Movement Profile for", name, year)
+    )
+}
+
+pitch_usage_table = function(data, name, year) {
+  
+  ## Error checks
+  required_columns = c("pitch_type", "player_name", "game_year")
+  if (!all(required_columns %in% colnames(data))) {
+    stop(paste(
+      "Input data must contain the following columns:",
+      paste(required_columns, collapse = ", ")
+    ))
+  }
+  
+  if (!name %in% data$player_name) {
+    stop(paste("Player name", name, "not found in the data."))
+  }
+  
+  ## Filter data for the specified player and drop NA
+  player_data = data |>
+    filter(player_name == name,
+           game_year == year) |>
+    drop_na(pitch_type)
+  
+  if (nrow(player_data) == 0) {
+    return(NULL)
+  }
+  
+  ## Count the number of pitches by pitch_type
+  usage_counts = player_data |>
+    group_by(pitch_type) |>
+    summarize(count = n(), .groups = "drop") |>
+    filter(count >= 5)  # Include only pitch types with at least 5 pitches thrown
+  
+  ## If no pitches remain, return an empty table
+  if (nrow(usage_counts) == 0) {
+    message(paste("No pitch types with >=5 pitches for", name))
+    return(tibble())
+  }
+  
+  ## Calculate percentage
+  total_pitches = sum(usage_counts$count)
+  
+  usage_counts = usage_counts |>
+    mutate(
+      percentage = round((count / total_pitches) * 100, 1)
+    ) |>
+    rename(Count = count, Percentage = percentage) |>
+    left_join(pitch_types_df, by = "pitch_type") |>
+    select(pitch_name, Count, Percentage)
+  
+  ## Convert to a wide format with pitch types as columns
+  usage_wide = usage_counts |>
+    pivot_longer(
+      cols = c(Count, Percentage), 
+      names_to = "METRIC", 
+      values_to = "VALUE"
+    ) |>
+    pivot_wider(
+      names_from = pitch_name,
+      values_from = VALUE
+    )
+  
+  ## Print a title before returning the table
+  title_text = paste("Pitch Usage for", name, year)
+  message(title_text)
+  
+  return(usage_wide)
+}
+
+## Percentile Profile
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+percentile_profile <- function(data, name, year) {
+  
+  # Prepare data for plotting
+  plot_data <- data |>
+    filter(player_name == name, game_year == year) |>
+    select(
+      `Avg Exit Velocity` = percentile_avg_exit_velo,
+      wOBA = percentile_woba_against,
+      `Ground Ball Rate` = percentile_gb_rate,
+      `Fly Ball Rate` = percentile_fb_rate,
+      `Line Drive Rate` = percentile_ld_rate,
+      `K Rate` = percentile_k_rate,
+      `BB Rate` = percentile_bb_rate
+    ) |>
+    pivot_longer(
+      cols = everything(),
+      names_to = "Metric",
+      values_to = "Percentile"
+    )
+  
+  # Set the levels of Metric to ensure order
+  plot_data$Metric <- factor(
+    plot_data$Metric,
+    levels = c(
+      "Avg Exit Velocity",
+      "wOBA",
+      "Ground Ball Rate",
+      "Fly Ball Rate",
+      "Line Drive Rate",
+      "K Rate",
+      "BB Rate"
+    )
+  )
+  
+  # Create the plot
+  percentile_plot <- ggplot(plot_data, aes(x = Metric, y = Percentile)) +
+    geom_col(width = 0.5, aes(fill = Percentile)) + # Skinnier bars
+    geom_point(aes(x = Metric, y = Percentile), size = 10, color = "black", fill = "white", shape = 21) + # Circles
+    geom_text(aes(x = Metric, y = Percentile, label = Percentile), vjust = 0.5, color = "black", size = 3.5, fontface = "bold") + # Annotated values
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "grey",
+      high = "red",
+      midpoint = 50, # Middle point of the gradient
+      limits = c(0, 100)
+    ) +
+    scale_y_continuous(
+      breaks = c(0, 50, 100), # Always show breaks at 0, 50, and 100
+      labels = c("Poor", "Average", "Great"), # Custom labels for the breaks
+      limits = c(0, 100) # Ensure the scale always runs from 0 to 100
+    ) +
+    labs(
+      title = paste(year, name, "MLB Percentile Rankings"),
+      x = "",
+      y = ""
+    ) +
+    coord_flip() +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 12),
+      axis.text.x = element_text(size = 12), # Displays x-axis text for the labels
+      axis.ticks = element_blank(), # Removes tick marks
+      axis.title = element_text(size = 14),
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "none" # Removes the legend
+    )
+  
+  return(percentile_plot)
+}
+
+```
